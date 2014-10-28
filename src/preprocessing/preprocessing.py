@@ -1,3 +1,4 @@
+import hashlib
 import json
 import cv2
 import numpy as np
@@ -21,7 +22,7 @@ class FeatureExtractor(object):
 	RAW_LABELS_FNAME = 'data_and_scripts/train_outputs.csv'
 	PROCESSED_DIR = 'data/processed'
 	SIFT_WORDS_FNAME = 'sift_words.json'
-	SIFT_FEATURES_FNAME = 'sift.json'
+	SIFT_FEATURES_FNAME = 'sift_%s.json'
 	SIFT_VOCAB_FNAME = 'sift_vocab.json'
 
 	def __init__(
@@ -81,6 +82,16 @@ class FeatureExtractor(object):
 		return self.sift_features
 
 
+	def get_sift_fname(self):
+		'''
+			get a string that is likely to be unique and that depends on the
+			particular images that have been read
+		'''
+		contents = repr(self.NUM_TRAINING_IMAGES) + repr(self.NUM_TEST_IMAGES)
+		hsh =  hashlib.sha224(contents).hexdigest()[:10]
+		return self.SIFT_FEATURES_FNAME % hsh
+
+
 	def read_sift_features(self):
 		'''
 			reads in the sift features and converts them into numpy arrays.
@@ -88,7 +99,7 @@ class FeatureExtractor(object):
 
 		print 'reading precomputed sift features from file...'
 		precomputed_sift_fname = os.path.join(
-			self.PROCESSED_DIR, self.SIFT_FEATURES_FNAME)
+			self.PROCESSED_DIR, self.get_sift_fname())
 		
 		self.sift_features =  json.loads(open(precomputed_sift_fname).read())
 
@@ -107,7 +118,7 @@ class FeatureExtractor(object):
 
 		# otherwise, look for precomputed sift features on disk
 		precomputed_sift_fname = os.path.join(
-			self.PROCESSED_DIR, self.SIFT_FEATURES_FNAME)
+			self.PROCESSED_DIR, self.get_sift_fname())
 
 		if os.path.isfile(precomputed_sift_fname) and use_cache:
 			self.sift_features = self.read_sift_features()
