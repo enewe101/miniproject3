@@ -7,10 +7,11 @@ import csv
 import random
 import copy
 import time
+import sys
 from collections import Counter, defaultdict
 from scipy.cluster import vq
 try:
-	from sklearn.cluster import KMeans
+	from sklearn.cluster import MiniBatchKMeans
 	from sklearn.externals import joblib
 except ImportError:
 	print 'sklearn is not currently available'
@@ -122,7 +123,7 @@ class FeatureExtractor(object):
 			return self.sift_features
 
 		# otherwise, compute or load each sift image's sift features
-		print 'getting sift features, this may take several minutes'
+		print '\nGetting sift features, this may take several minutes...'
 		self.sift_features = {}
 		reading_list = [
 			('train', self.train_image_idxs),
@@ -138,7 +139,10 @@ class FeatureExtractor(object):
 					progress = idx
 					if data_part == 'test':
 						progress += self.NUM_TRAINING_IMAGES 
-					print '%2.1f%%' % (100 * progress / num_to_read)
+					print (
+						'\tLoading sift features... %2.1f%%' 
+						% (100 * progress / num_to_read)
+					)
 
 				# we adopt a naming convention to index sift features in 
 				# memory and on disk
@@ -198,30 +202,41 @@ class FeatureExtractor(object):
 		fname = self.get_vocab_fname(k, limit)
 
 		if use_cache and os.path.isfile(fname):
+			print '\nUsing existing codebook for translation'
 			fitted = joblib.load(fname)
 			code_book = fitted.cluster_centers_
 			return fitted, code_book
 
 		# load up all of the sift features, subsample to a reasonable amount
 		sift_features = self.as_bag(self.get_sift_features(use_cache))
-		print 'There are %d sift features in total.' % len(sift_features)
+
+		# print a message
+		print '\nThere are %d sift features in total.' % len(sift_features)
+		if limit is None:
+			print 'Using all features.'
+		else:
+			print 'Randomly subsampling %d features' % limit
+
 		if limit is not None:
 			sift_features = random.sample(sift_features, limit)
 
 		# do k-means clustering
-		print 'clustering to build feature vocabulary'
+		print (
+			'\nClustering to build feature vocabulary.  This may take '
+			'several hours...'
+		)
+
 		start = time.time()
-		kmeans = KMeans(
+		kmeans = MiniBatchKMeans(
 			n_clusters=k,
-			n_init=1,
-			n_jobs=8,
-			precompute_distances=True
+			n_init=1
 		)
 		fitted = kmeans.fit(sift_features)
 		code_book = fitted.cluster_centers_
 		print time.time() - start
 
 		# write the fitted model to file
+		print ('\nClustering finished, recording cluster notes to file.')
 		joblib.dump(fitted, fname, compress=9)
 
 		return fitted, code_book
@@ -245,16 +260,21 @@ class FeatureExtractor(object):
 	def as_sift_word_counts(self, k=100, limit=None, use_cache=True):
 
 		# get the sift word vocabulary
-		fitted, code_book = self.get_sift_vocab(k, limit, use_cache)
+		fitted, code_book = self.get_sift_vocab(
+			k, limit, use_cache)
 		sift_features = self.get_sift_features()
 
+		print '\nConverting image descriptions to sift word counts'
 		# for each image, make an entry in the sift words csv file 
-		for data_part in ['test', 'train']:
+		for data_part in ['train', 'test']:
 
 			# Open a csv writer to write out the sift word descriptions
 			sift_words_fname = self.get_sift_words_fname(data_part, k, limit)
 			sift_words_fh = open(sift_words_fname, 'w')
 			sift_words_writer = csv.writer(sift_words_fh)
+
+			task_length = float(
+				len(self.train_image_idxs) + len(self.test_image_idxs))
 
 			# get the right index list
 			if data_part == 'train':
@@ -267,6 +287,15 @@ class FeatureExtractor(object):
 			# iterate over all the images identified for this data_part
 			# converting the sift feature descriptions into sift word counts
 			for idx in indexes:
+
+				# show progress
+				if idx % 100 == 0:
+					progress = idx 
+					if data_part == 'test':
+						progress += len(self.train_image_idxs)
+
+					print 'translating... %2.1f%%' % (100*progress / task_length)
+
 				key = self.get_sift_key(data_part, idx)
 				these_features = sift_features[key]
 
@@ -298,103 +327,28 @@ class FeatureExtractor(object):
 
 
 
-# Deprecated -- scipy has a very fast implementation
-class KMeansFinder(object):
 
-	def __init__(self):
-		pass
-
-
-	def cluster(self, vectors, k):
-
-		# initialize
-		self.vectors = vectors
-		self.k = k
-		self.means = random.sample(vectors, k)
-		self.changed = True
-		self.point_allocation = {}
-		self.clusters = {}
-		self.before_first_allocation = True
-
-		while self.changed:
-			self.iterate()
-			convergence =  (len(vectors) - self.changed) / float(len(vectors))
-			print '%2.1f%% convergence' % (100 * convergence)
-
-		return copy.deepcopy(self.means)
-
-
-	def iterate(self):
-		self.changed = 0
-		self.reallocate()
-		self.compute_means()
-	
-
-	def compute_means(self):
-		'''
-			find the midpoint of each cluster based on all the vectors 
-			allocated to that cluster.
-		'''
-
-		self.means = [
-			np.mean([self.vectors[p] for p in self.clusters[m]], 0).tolist()
-			for m in range(self.k)
-		]
-
-
-	def calc_distance(self, p1, p2):
-		'''
-			calculates the euclidean distance between two points
-		'''
-		return np.sqrt(
-			reduce(
-				lambda x,y: x + (y[0] - y[1])**2, 
-				zip(p1, p2), 0
-			)
+if __name__ == '__main__':
+	if len(sys.argv) < 2 or len(sys.argv) > 3:
+		raise ValueError(
+			'You must supply the size of sift vocabulary to use,'
+			' as an integer, e.g.'
+			'\n\t`python preprocessing.py 100`'
+			'\nYou may also'
+			' (optionally) subsample from the total sift features with a'
+			' second argument, e.g. '
+			'\n\t`python preprocessing.py 100 5000`'
 		)
 
+	k = int(sys.argv[1])
+	fx = FeatureExtractor()
 
+	if len(sys.argv) > 2:
+		limit = int(sys.argv[2])
+		fx.as_sift_word_counts(k=k, limit=limit)
 
-	def reallocate(self):
-		'''
-			Finds the closest mean of all the k means.  If a point is allocated
-			to a new closest mean (different from last time), then the 
-			self.changed flag is set to true.  This helps determine 
-			convergence.
-		'''
-		self.clusters = defaultdict(lambda: [])
-		for point_idx, point in enumerate(self.vectors):
+	else:
+		fx.as_sift_word_counts(k=k)
 
-			if point_idx % 100 == 0:
-				progress = point_idx / float(len(self.vectors))
-				print '\t%2.1f%% allocated' % progress
-
-			# calculate the distance from this point to all the means, and
-			# find the closest mean
-			closest_mean = self.allocate(point)
-
-			if (
-				self.before_first_allocation or 
-				self.point_allocation[point_idx] != closest_mean
-			):
-				self.changed += 1
-
-			self.point_allocation[point_idx] = closest_mean
-			self.clusters[closest_mean].append(point_idx)
-
-		self.before_first_allocation = False
-
-
-	def allocate(self, point):
-		distance, closest_mean = sorted([
-			(self.calc_distance(point, m), m_idx) 
-			for m_idx, m in enumerate(self.means)
-		])[0]
-
-		return closest_mean
-
-
-
-
-
+	print 'Finished.'
 
