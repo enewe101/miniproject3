@@ -9,9 +9,9 @@ import copy
 import time
 from collections import Counter, defaultdict
 from scipy.cluster import vq
-
 try:
 	from sklearn.cluster import KMeans
+	from sklearn.externals import joblib
 except ImportError:
 	print 'sklearn is not currently available'
 
@@ -26,18 +26,21 @@ class FeatureExtractor(object):
 	TEST_IMAGE_DIR = 'train_images'
 	RAW_LABELS_FNAME = 'data_and_scripts/train_outputs.csv'
 	PROCESSED_DIR = 'data/processed'
-	SIFT_WORDS_FNAME = 'sift_words.json'
+	VOCAB_DIR = 'sift_vocab'
+	SIFT_WORDS_FNAME = 'sift_words.csv'
+	SIFT_WORDS_DIR = 'sift_words'
 	SIFT_FEATURES_DIR = 'sift_features'
 	SIFT_VOCAB_FNAME = 'sift_vocab.json'
 
 	def __init__(
 			self,
 			train_image_idxs=range(1,NUM_TRAINING_IMAGES+1),
-			test_image_idxs = range(1,NUM_TEST_IMAGES+1),
+			test_image_idxs=range(1,NUM_TEST_IMAGES+1),
+			limit=None
 		):
-
-		self.train_image_idxs = train_image_idxs
-		self.test_image_idxs = test_image_idxs
+		
+		self.train_image_idxs = train_image_idxs[:limit]
+		self.test_image_idxs = test_image_idxs[:limit]
 
 		# sifter is an object used to extract sift features, made when needed
 		self.sifter = None
@@ -50,11 +53,11 @@ class FeatureExtractor(object):
  
 
 
-	def compute_or_load_sift(self, data_part, idx):
+	def compute_or_load_sift(self, data_part, idx, use_cache=True):
 
 		# first we try to load from file
 		sift_fname = self.get_sift_fname(data_part, idx)
-		if os.path.isfile(sift_fname):
+		if use_cache and os.path.isfile(sift_fname):
 			return self.read_sift(sift_fname)
 
 		# otherwise try to calculate
@@ -112,14 +115,14 @@ class FeatureExtractor(object):
 		return fpath
 
 
-	def get_all_sift_features(self, use_cache=True):
+	def get_sift_features(self, use_cache=True):
 
 		# check if we have the sift features in memory already
 		if self.sift_features is not None and use_cache:
 			return self.sift_features
 
 		# otherwise, compute or load each sift image's sift features
-		print 'computing all sift features from scratch'
+		print 'getting sift features, this may take several minutes'
 		self.sift_features = {}
 		reading_list = [
 			('train', self.train_image_idxs),
@@ -141,7 +144,7 @@ class FeatureExtractor(object):
 				# memory and on disk
 				key = self.get_sift_key(data_part, idx)
 				self.sift_features[key] = self.compute_or_load_sift(
-					data_part, idx)
+					data_part, idx, use_cache)
 
 		return self.sift_features
 
@@ -153,34 +156,136 @@ class FeatureExtractor(object):
 			big list of features.  This is useful for k means clustering
 		'''
 
-		return np.concatenate(dict_of_list_of_vectors.values())
+		# Get a list of sift feature descriptions for all images.
+		# Eliminate any descriptions for images having no sift features.
+		null_array = np.array(None)
+		list_of_list_of_vectors = filter(
+			lambda x: not np.array_equal(x, null_array),
+			dict_of_list_of_vectors.values()
+		)
+		return np.concatenate(list_of_list_of_vectors)
 
 
-	def find_sift_vocab(self, k, use_cache=True):
+	def get_vocab_fname(self, k, limit):
 
-		# open a file for writing
-		fname = os.path.join(self.PROCESSED_DIR, self.SIFT_VOCAB_FNAME)
-		fh = open(fname, 'w')
+		# get a unique string based on the settings that determine the vocab
+		fname = 'k-%d' % k
+
+		if limit is not None:
+			fname += '.limit-%d' % limit
+
+		# hash the settings that determine which images are included
+		# to keep vocabs for different subsets of images separate
+		relevant_settings = repr(self.train_image_idxs) 
+		relevant_settings += repr(self.test_image_idxs)
+		unique_string = hashlib.sha224(relevant_settings).hexdigest()[:6]
+		fname += '.' + unique_string
+		
+		# add the file extension
+		fname += '.pkl'
+
+		# prepend with the right path
+		return os.path.join(self.PROCESSED_DIR, self.VOCAB_DIR, fname) 
+
+
+	def get_sift_vocab(self, k=100, limit=None, use_cache=True):
+
+		'''
+			gets a codebook and a trained clusterer for the set of sift 
+			features in the images identified by self.train_image_idxs
+			and self.test_image_idxs.
+		'''
+		fname = self.get_vocab_fname(k, limit)
+
+		if use_cache and os.path.isfile(fname):
+			fitted = joblib.load(fname)
+			code_book = fitted.cluster_centers_
+			return fitted, code_book
 
 		# load up all of the sift features, subsample to a reasonable amount
-		sift_features = self.as_bag(self.get_all_sift_features(use_cache))
-		print len(sift_features)
-		sift_features = random.sample(sift_features, 500)
+		sift_features = self.as_bag(self.get_sift_features(use_cache))
+		print 'There are %d sift features in total.' % len(sift_features)
+		if limit is not None:
+			sift_features = random.sample(sift_features, limit)
 
 		# do k-means clustering
 		print 'clustering to build feature vocabulary'
 		start = time.time()
-		kmeans = KMeans(n_clusters=k, n_init=1)
-		kmeans.fit(sift_features)
+		kmeans = KMeans(
+			n_clusters=k,
+			n_init=1,
+			n_jobs=8,
+			precompute_distances=True
+		)
+		fitted = kmeans.fit(sift_features)
+		code_book = fitted.cluster_centers_
 		print time.time() - start
 
-		sift_features_array = np.array(sift_features)
-		start = time.time()
-		self.sift_words, distortion = vq.kmeans(sift_features_array, k)
-		print time.time() - start
+		# write the fitted model to file
+		joblib.dump(fitted, fname, compress=9)
 
-		# write the cluster centers to file
-		fh.write(json.dumps(self.sift_words.tolist(), indent=2))
+		return fitted, code_book
+
+
+	def get_sift_words_fname(self, data_part, k, limit):
+
+		fname = data_part
+		# get a unique string based on the settings that determine the vocab
+		fname += '.k-%d' % k
+
+		if limit is not None:
+			fname += '.limit-%d' % limit
+
+		fname += '.csv'
+
+		# prepend with the right path
+		return os.path.join(self.PROCESSED_DIR, self.SIFT_WORDS_DIR, fname) 
+
+
+
+	def as_sift_word_counts(self, k=100, limit=None, use_cache=True):
+
+
+		# get the sift word vocabulary
+		fitted, code_book = self.get_sift_vocab(k, limit, use_cache)
+		sift_features = self.get_sift_features()
+
+		# for each image, make an entry in the sift words csv file 
+		for data_part in ['test', 'train']:
+
+			# Open a csv writer to write out the sift word descriptions
+			sift_words_fname = self.get_sift_words_fname(data_part, k, limit)
+			sift_words_fh = open(sift_words_fname, 'w')
+			sift_words_writer = csv.writer(sift_words_fh)
+
+			# get the right index list
+			if data_part == 'train':
+				indexes = self.train_image_idxs 
+			elif data_part == 'test':
+				indexes = self.test_image_idxs
+			else:
+				raise ValueError('data_part must be `test` or `train`.')
+
+			# iterate over all the images identified for this data_part
+			# converting the sift feature descriptions into sift word counts
+			for idx in indexes:
+				key = self.get_sift_key(data_part, idx)
+				these_features = sift_features[key]
+
+				# map the sift features into sift words
+				try:
+					sift_words = fitted.predict(these_features)
+				except ValueError:
+					print 'bad feature vector:\n%s' % str(these_features)
+					sift_words = []
+
+				# format the description as counts of sift words
+				counts = np.zeros(k)
+				for word in sift_words:
+					counts[word] += 1
+
+				sift_words_writer.writerow([idx] + [int(x) for x in counts])
+
 
 
 	def read_outputs(self):
