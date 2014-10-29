@@ -1,1 +1,4 @@
-data/raw/*
+data/*
+*.swp
+*.pyc
+*python
