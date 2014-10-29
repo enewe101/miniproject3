@@ -23,7 +23,7 @@ class FeatureExtractor(object):
 
 	RAW_DATA_DIR = 'data/raw'
 	TRAIN_IMAGE_DIR = 'train_images'
-	TEST_IMAGE_DIR = 'train_images'
+	TEST_IMAGE_DIR = 'test_images'
 	RAW_LABELS_FNAME = 'data_and_scripts/train_outputs.csv'
 	PROCESSED_DIR = 'data/processed'
 	VOCAB_DIR = 'sift_vocab'
@@ -242,9 +242,7 @@ class FeatureExtractor(object):
 		return os.path.join(self.PROCESSED_DIR, self.SIFT_WORDS_DIR, fname) 
 
 
-
 	def as_sift_word_counts(self, k=100, limit=None, use_cache=True):
-
 
 		# get the sift word vocabulary
 		fitted, code_book = self.get_sift_vocab(k, limit, use_cache)
