@@ -1,5 +1,9 @@
 miniproject3
 ============
-This project does not include the raw data.  You need to download it and 
-unzip it inside the data/raw directory of this project before attempting to
-run any scripts :)
+This project does not include the raw data.  You need to download the 
+zip files for the data into data/raw.  Extract them there (they will make
+their own sub-folders within data/raw)
+
+
+To run the SIFT-bag-of-features-based classifier:
+go to project-root/src/pre-processing and read the README located there!
